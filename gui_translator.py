@@ -231,7 +231,7 @@ def _pick_font(para) -> str:
 
 
 MIN_BODY_PT      = 9     # 본문 최소 폰트 크기 (pt)
-LINE_SPACING     = 1.2   # 줄 간격 배율
+LINE_SPACING     = 1.25  # 줄 간격 배율
 BODY_SPACE_AFTER = 0     # 본문 단락 후 여백 pt
 HEAD_SPACE_AFTER = 4     # 제목 단락 후 여백 pt
 HEAD_SPACE_BEFORE= 3     # 제목 단락 전 여백 pt
