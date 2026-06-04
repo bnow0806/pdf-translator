@@ -1,6 +1,5 @@
-# PyInstaller 빌드 결과물
+# PyInstaller 빌드 결과물 (exe 파일 제외)
 dist/
-build/
 *.spec.bak
 
 # Python 캐시
