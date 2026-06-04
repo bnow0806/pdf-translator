@@ -1,0 +1,26 @@
+# PyInstaller 빌드 결과물
+dist/
+build/
+*.spec.bak
+
+# Python 캐시
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 임시 파일
+*.tmp
+*.temp
+~$*
+
+# 번역 테스트 출력 파일
+*_ko.pdf
+*_en.pdf
+*_translated.*
+
+# 사용자 설정 (API 키 등)
+.deepl_pdf_config.json
+.azure_pdf_translator_config.json
+.google_pdf_translator_config.json
+.papago_pdf_translator_config.json
+.pdf_translator_config.json
