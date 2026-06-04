@@ -199,7 +199,7 @@ def translate_paragraphs_parallel(all_texts, source, target, progress_cb, cancel
 # - 제목(큰 글씨/굵게): 맑은 고딕 — 깔끔한 산세리프, 시각적 구분
 FONT_BODY    = "바탕"
 FONT_HEADING = "맑은 고딕"
-HEADING_PT   = 16   # 16pt 이상만 제목 폰트 (본문 최대 ~13pt, 실제 제목 16pt~)
+HEADING_PT   = 16   # 16pt 이상만 제목 폰트
 
 
 def _set_run_font(run, font_name: str):
