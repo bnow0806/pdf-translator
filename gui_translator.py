@@ -22,7 +22,11 @@ except ImportError:
     HAS_DND = False
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+from tkinter import filedialog, messagebox
+import customtkinter as ctk
+
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 CONFIG_FILE = Path.home() / ".pdf_translator_config.json"
@@ -35,25 +39,21 @@ LANGUAGES = [
     ("vi","베트남어"), ("th","태국어"), ("id","인도네시아어"),
 ]
 
-# ── 라이트 테마 ───────────────────────────────────────────────────────────────
-C = {
-    "bg":       "#ffffff",
-    "surface":  "#f5f5f5",
-    "border":   "#d0d0d0",
-    "entry":    "#f9f9f9",
-    "fg":       "#1a1a1a",
-    "subtle":   "#777777",
-    "accent":   "#0078d4",
-    "accent_h": "#005fa3",
-    "green":    "#107c10",
-    "red":      "#c50f1f",
-    "yellow":   "#835c00",
-    "drop":     "#eef4ff",
-    "drop_hl":  "#d4e8ff",
-    "drop_bd":  "#0078d4",
-    "bar_bg":   "#e0e0e0",
-    "bar_fg":   "#0078d4",
-}
+# ── 다크 팔레트 ──────────────────────────────────────────────────────────────
+_BG      = "#0f172a"
+_SURFACE = "#1e293b"
+_BORDER  = "#2d3f55"
+_ACCENT  = "#3b82f6"
+_ACCENT2 = "#2563eb"
+_FG      = "#f1f5f9"
+_SUBTLE  = "#64748b"
+_GREEN   = "#22c55e"
+_RED     = "#ef4444"
+_YELLOW  = "#f59e0b"
+_INFO    = "#60a5fa"
+_LOG_BG  = "#080f1c"
+_DROP_BG = "#111f35"
+_DROP_HL = "#182d4a"
 
 # ─────────────────────────────────────────────────────────────────────────────
 def load_config():
@@ -324,12 +324,19 @@ def apply_translations(doc, items, translated):
         font_name  = _pick_font(para)
         _set_run_font(first, font_name)
 
+        # 전체 run 중 최솟값을 기준 크기로 사용 (첫 run만 큰 경우 방지)
+        all_sizes = [r.font.size for r in para.runs if r.font.size]
+        ref_size  = min(all_sizes) if all_sizes else first.font.size
+
         if font_name == FONT_BODY:
             first.bold = False
-            if first.font.size:
-                size_pt     = first.font.size / 12700
+            if ref_size:
+                size_pt     = ref_size / 12700
                 new_size_pt = max(MIN_BODY_PT, size_pt - 2)
                 first.font.size = int(new_size_pt * 12700)
+        else:  # FONT_HEADING: 크기는 최솟값으로 정규화 (bold 유지)
+            if ref_size:
+                first.font.size = ref_size
 
         # 나머지 run 비우기
         for run in para.runs[1:]:
@@ -491,83 +498,76 @@ def collect_paragraphs(doc):
 # ── 앱 ───────────────────────────────────────────────────────────────────────
 class App:
     def __init__(self):
-        self.root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
-        self.root.title("PDF 번역기")
-        self.root.geometry("620x560")
-        self.root.minsize(500, 480)
-        self.root.configure(bg=C["bg"])
+        if HAS_DND:
+            class _Root(ctk.CTk, TkinterDnD.DnDWrapper):
+                def __init__(self_):
+                    ctk.CTk.__init__(self_)
+                    self_.TkdndVersion = TkinterDnD._require(self_)
+            self.root = _Root()
+        else:
+            self.root = ctk.CTk()
 
-        self._style()
+        W, H = 700, 740
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        self.root.geometry(f"{W}x{H}+{(sw - W) // 2}+{(sh - H) // 2}")
+        self.root.minsize(600, 640)
+        self.root.title("PDF 번역기")
+        self.root.configure(fg_color=_BG)
+
         self.cfg = load_config()
         self._cancel = threading.Event()
         self._build()
         self._load_cfg()
 
-    # ── 스타일 ────────────────────────────────────────────────────────────────
-    def _style(self):
-        s = ttk.Style(self.root)
-        s.theme_use("clam")
-        s.configure(".",
-            background=C["bg"], foreground=C["fg"],
-            font=("맑은 고딕", 10))
-        s.configure("TFrame",      background=C["bg"])
-        s.configure("TLabel",      background=C["bg"], foreground=C["fg"])
-        s.configure("TLabelframe",
-            background=C["bg"], bordercolor=C["border"],
-            relief="solid", borderwidth=1)
-        s.configure("TLabelframe.Label",
-            background=C["bg"], foreground=C["accent"],
-            font=("맑은 고딕", 10, "bold"))
-        s.configure("TEntry",
-            fieldbackground=C["entry"], foreground=C["fg"],
-            insertcolor=C["fg"], bordercolor=C["border"])
-        s.configure("TCombobox",
-            fieldbackground=C["entry"], foreground=C["fg"],
-            background=C["bg"], arrowcolor=C["accent"],
-            bordercolor=C["border"])
-        s.map("TCombobox",
-            fieldbackground=[("readonly", C["entry"])],
-            selectbackground=[("readonly", C["entry"])],
-            selectforeground=[("readonly", C["fg"])])
-        s.configure("TProgressbar",
-            troughcolor=C["bar_bg"], background=C["bar_fg"],
-            borderwidth=0, thickness=14)
-        s.configure("TButton",
-            background=C["surface"], foreground=C["fg"],
-            bordercolor=C["border"], relief="solid",
-            borderwidth=1, padding=(8, 5))
-        s.map("TButton",
-            background=[("active", C["border"]), ("disabled", C["surface"])],
-            foreground=[("disabled", C["subtle"])])
-        s.configure("Accent.TButton",
-            background=C["accent"], foreground="#ffffff",
-            font=("맑은 고딕", 11, "bold"),
-            padding=(24, 11), borderwidth=0)
-        s.map("Accent.TButton",
-            background=[("active", C["accent_h"]), ("disabled", C["bar_bg"])],
-            foreground=[("disabled", C["subtle"])])
-
     # ── UI ────────────────────────────────────────────────────────────────────
     def _build(self):
-        pad = dict(padx=20, pady=16)
-        main = ttk.Frame(self.root)
-        main.pack(fill=tk.BOTH, expand=True, **pad)
+        r = self.root
 
-        # ── PDF 파일 ──
-        ff = ttk.LabelFrame(main, text=" PDF 파일 ", padding=(12, 8))
-        ff.pack(fill=tk.X, pady=(0, 12))
+        # ── 헤더 ──────────────────────────────────────────────────────────────
+        hdr = ctk.CTkFrame(r, fg_color=_SURFACE, corner_radius=14,
+                           border_color=_BORDER, border_width=1)
+        hdr.pack(fill=tk.X, padx=20, pady=(20, 0))
+
+        hrow = ctk.CTkFrame(hdr, fg_color="transparent")
+        hrow.pack(fill=tk.X, padx=22, pady=16)
+
+        icon = tk.Label(hrow, text="⬡", bg=_SURFACE, fg=_ACCENT,
+                        font=("Segoe UI Symbol", 30))
+        icon.pack(side=tk.LEFT, padx=(0, 14))
+
+        tcol = ctk.CTkFrame(hrow, fg_color="transparent")
+        tcol.pack(side=tk.LEFT)
+        ctk.CTkLabel(tcol, text="PDF 번역기",
+                     font=ctk.CTkFont(family="맑은 고딕", size=19, weight="bold"),
+                     text_color=_FG).pack(anchor=tk.W)
+        ctk.CTkLabel(tcol, text="포맷을 유지하며 PDF를 자동으로 번역합니다",
+                     font=ctk.CTkFont(family="맑은 고딕", size=11),
+                     text_color=_SUBTLE).pack(anchor=tk.W)
+
+        # ── 파일 선택 ─────────────────────────────────────────────────────────
+        fc = ctk.CTkFrame(r, fg_color=_SURFACE, corner_radius=14,
+                          border_color=_BORDER, border_width=1)
+        fc.pack(fill=tk.X, padx=20, pady=(12, 0))
+
+        ctk.CTkLabel(fc, text="파일 선택",
+                     font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"),
+                     text_color=_FG).pack(anchor=tk.W, padx=22, pady=(14, 8))
 
         # 드롭 존
-        self.df = tk.Frame(ff, bg=C["drop"], cursor="hand2",
-                           highlightthickness=1,
-                           highlightbackground=C["drop_bd"], height=76)
-        self.df.pack(fill=tk.X, pady=(0, 10))
+        self.df = tk.Frame(fc, bg=_DROP_BG, height=92, cursor="hand2",
+                           highlightthickness=2, highlightbackground=_BORDER)
+        self.df.pack(fill=tk.X, padx=20, pady=(0, 12))
         self.df.pack_propagate(False)
-        self.di = tk.Label(self.df, text="📄", bg=C["drop"], font=("맑은 고딕", 22))
-        self.di.pack(pady=(7, 1))
-        self.dl = tk.Label(self.df, bg=C["drop"], fg=C["subtle"], font=("맑은 고딕", 10),
-                           text="PDF를 여기에 끌어다 놓거나  [클릭하여 선택]")
+
+        self.di = tk.Label(self.df, text="📄", bg=_DROP_BG,
+                           font=("Segoe UI Emoji", 22))
+        self.di.pack(pady=(10, 2))
+        self.dl = tk.Label(self.df, bg=_DROP_BG, fg=_SUBTLE,
+                           font=("맑은 고딕", 10), cursor="hand2",
+                           text="PDF를 여기에 끌어다 놓거나   클릭하여 선택")
         self.dl.pack()
+
         for w in (self.df, self.di, self.dl):
             w.bind("<Button-1>", lambda _: self._pick_in())
             w.bind("<Enter>",    lambda _: self._hover(True))
@@ -581,90 +581,142 @@ class App:
 
         self.iv = tk.StringVar()
         self.ov = tk.StringVar()
-        self._frow(ff, "입력:", self.iv, self._pick_in)
-        self._frow(ff, "출력:", self.ov, self._pick_out)
+        self._frow(fc, "입력", self.iv, self._pick_in)
+        self._frow(fc, "출력", self.ov, self._pick_out)
+        tk.Frame(fc, bg=_SURFACE, height=6).pack()
 
-        # ── 언어 ──
-        lf = ttk.LabelFrame(main, text=" 번역 언어 ", padding=(12, 10))
-        lf.pack(fill=tk.X, pady=(0, 12))
-        lr = ttk.Frame(lf)
-        lr.pack()
-        vals = [f"{c}  {n}" for c, n in LANGUAGES]
-        src  = ["auto  자동 감지"] + vals
+        # ── 번역 언어 ─────────────────────────────────────────────────────────
+        lc = ctk.CTkFrame(r, fg_color=_SURFACE, corner_radius=14,
+                          border_color=_BORDER, border_width=1)
+        lc.pack(fill=tk.X, padx=20, pady=(12, 0))
 
-        ttk.Label(lr, text="소스 언어:").pack(side=tk.LEFT)
-        self.sc = ttk.Combobox(lr, values=src, state="readonly", width=16)
-        self.sc.current(0)
-        self.sc.pack(side=tk.LEFT, padx=(6, 4))
+        ctk.CTkLabel(lc, text="번역 언어",
+                     font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"),
+                     text_color=_FG).pack(anchor=tk.W, padx=22, pady=(14, 8))
 
-        ttk.Label(lr, text="→", foreground=C["accent"],
-                  font=("맑은 고딕", 13, "bold")).pack(side=tk.LEFT, padx=6)
+        lrow = ctk.CTkFrame(lc, fg_color="transparent")
+        lrow.pack(padx=22, pady=(0, 16))
 
-        ttk.Label(lr, text="타겟 언어:").pack(side=tk.LEFT)
-        self.tc = ttk.Combobox(lr, values=vals, state="readonly", width=16)
-        self.tc.current(0)
-        self.tc.pack(side=tk.LEFT, padx=(6, 0))
-        self.tc.bind("<<ComboboxSelected>>", self._tgt_changed)
+        vals     = [f"{c}  {n}" for c, n in LANGUAGES]
+        src_vals = ["auto  자동 감지"] + vals
+        combo_kw = dict(
+            fg_color=_BG, border_color=_BORDER, width=190,
+            button_color=_BORDER, button_hover_color=_ACCENT,
+            dropdown_fg_color=_SURFACE, dropdown_text_color=_FG,
+            dropdown_hover_color=_BORDER,
+            text_color=_FG,
+            font=ctk.CTkFont(family="맑은 고딕", size=11),
+        )
 
-        # ── 버튼 ──
-        br = ttk.Frame(main)
-        br.pack(fill=tk.X, pady=(0, 12))
-        self.btn = ttk.Button(br, text="번역 시작", style="Accent.TButton",
-                              command=self._start)
-        self.btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
-        self.cbtn = ttk.Button(br, text="취소", command=self._do_cancel,
-                               state=tk.DISABLED, width=7)
+        self.sc = ctk.CTkComboBox(lrow, values=src_vals, **combo_kw)
+        self.sc.set(src_vals[0])
+        self.sc.pack(side=tk.LEFT)
+
+        ctk.CTkLabel(lrow, text=" → ",
+                     font=ctk.CTkFont(family="맑은 고딕", size=15, weight="bold"),
+                     text_color=_ACCENT).pack(side=tk.LEFT, padx=14)
+
+        self.tc = ctk.CTkComboBox(lrow, values=vals,
+                                  command=self._tgt_changed, **combo_kw)
+        self.tc.set(vals[0])
+        self.tc.pack(side=tk.LEFT)
+
+        # ── 실행 버튼 ─────────────────────────────────────────────────────────
+        br = ctk.CTkFrame(r, fg_color="transparent")
+        br.pack(fill=tk.X, padx=20, pady=(14, 0))
+
+        self.btn = ctk.CTkButton(
+            br, text="번역 시작",
+            fg_color=_ACCENT, hover_color=_ACCENT2, text_color="#ffffff",
+            font=ctk.CTkFont(family="맑은 고딕", size=13, weight="bold"),
+            height=46, corner_radius=10, command=self._start)
+        self.btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+
+        self.cbtn = ctk.CTkButton(
+            br, text="취소",
+            fg_color=_SURFACE, hover_color=_BORDER,
+            text_color=_SUBTLE, border_color=_BORDER, border_width=1,
+            font=ctk.CTkFont(family="맑은 고딕", size=12),
+            height=46, corner_radius=10, width=84, state="disabled",
+            command=self._do_cancel)
         self.cbtn.pack(side=tk.LEFT)
 
-        # ── 진행률 ──
-        pf = ttk.LabelFrame(main, text=" 진행 상황 ", padding=(12, 8))
-        pf.pack(fill=tk.BOTH, expand=True)
+        # ── 진행 상황 ─────────────────────────────────────────────────────────
+        pc = ctk.CTkFrame(r, fg_color=_SURFACE, corner_radius=14,
+                          border_color=_BORDER, border_width=1)
+        pc.pack(fill=tk.BOTH, expand=True, padx=20, pady=(14, 20))
 
-        # 퍼센트 레이블 + 프로그레스바
-        top = ttk.Frame(pf)
-        top.pack(fill=tk.X, pady=(0, 6))
-        self.pct_lbl = tk.Label(top, text="0%", bg=C["bg"], fg=C["accent"],
-                                font=("맑은 고딕", 10, "bold"), width=5, anchor=tk.E)
+        ptop = ctk.CTkFrame(pc, fg_color="transparent")
+        ptop.pack(fill=tk.X, padx=22, pady=(14, 6))
+        ctk.CTkLabel(ptop, text="진행 상황",
+                     font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"),
+                     text_color=_FG).pack(side=tk.LEFT)
+        self.pct_lbl = ctk.CTkLabel(
+            ptop, text="0%",
+            font=ctk.CTkFont(family="맑은 고딕", size=12, weight="bold"),
+            text_color=_ACCENT)
         self.pct_lbl.pack(side=tk.RIGHT)
-        self.pbar = ttk.Progressbar(top, mode="determinate", maximum=100)
-        self.pbar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
 
-        self.status = tk.Label(pf, text="대기 중", bg=C["bg"], fg=C["subtle"],
-                               font=("맑은 고딕", 9), anchor=tk.W)
-        self.status.pack(fill=tk.X, pady=(0, 6))
+        self.pbar = ctk.CTkProgressBar(
+            pc, fg_color=_BG, progress_color=_ACCENT,
+            corner_radius=4, height=7)
+        self.pbar.set(0)
+        self.pbar.pack(fill=tk.X, padx=22, pady=(0, 6))
 
-        self.log = scrolledtext.ScrolledText(
-            pf, height=6, wrap=tk.WORD, relief="solid",
-            borderwidth=1,
-            bg=C["surface"], fg=C["fg"], font=("Consolas", 9),
-            insertbackground=C["fg"],
-        )
+        self.status = ctk.CTkLabel(
+            pc, text="대기 중",
+            font=ctk.CTkFont(family="맑은 고딕", size=10),
+            text_color=_SUBTLE)
+        self.status.pack(anchor=tk.W, padx=22, pady=(0, 10))
+
+        tk.Frame(pc, bg=_BORDER, height=1).pack(fill=tk.X)
+
+        self.log = ctk.CTkTextbox(
+            pc, fg_color=_LOG_BG, text_color=_FG,
+            font=ctk.CTkFont(family="맑은 고딕", size=12),
+            corner_radius=0, border_width=0, wrap="word")
         self.log.pack(fill=tk.BOTH, expand=True)
-        for tag, col in [("ok", C["green"]), ("err", C["red"]),
-                         ("info", C["accent"]), ("warn", C["yellow"])]:
-            self.log.tag_configure(tag, foreground=col)
-        self.log.config(state=tk.DISABLED)
+
+        tw = self.log._textbox
+        tw.tag_configure("ok",   foreground=_GREEN)
+        tw.tag_configure("err",  foreground=_RED)
+        tw.tag_configure("info", foreground=_INFO)
+        tw.tag_configure("warn", foreground=_YELLOW)
+        tw.tag_configure("ts",   foreground=_SUBTLE)
+        self.log.configure(state="disabled")
 
     def _frow(self, parent, label, var, cmd):
-        r = ttk.Frame(parent)
-        r.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(r, text=label, width=7, anchor=tk.W).pack(side=tk.LEFT)
-        ttk.Entry(r, textvariable=var, font=("맑은 고딕", 9)
-                  ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-        ttk.Button(r, text="찾기", width=5, command=cmd).pack(side=tk.LEFT)
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill=tk.X, padx=20, pady=(0, 6))
+        ctk.CTkLabel(row, text=label, width=40, anchor=tk.W,
+                     font=ctk.CTkFont(family="맑은 고딕", size=11),
+                     text_color=_SUBTLE).pack(side=tk.LEFT)
+        ctk.CTkEntry(row, textvariable=var,
+                     fg_color=_BG, border_color=_BORDER, text_color=_FG,
+                     font=ctk.CTkFont(family="맑은 고딕", size=10)
+                     ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 8))
+        ctk.CTkButton(row, text="찾기", width=58,
+                      fg_color=_SURFACE, hover_color=_BORDER,
+                      text_color=_FG, border_color=_BORDER, border_width=1,
+                      font=ctk.CTkFont(family="맑은 고딕", size=11),
+                      height=30, corner_radius=6,
+                      command=cmd).pack(side=tk.LEFT)
 
     # ── 헬퍼 ─────────────────────────────────────────────────────────────────
     def _load_cfg(self):
         if "target_lang" in self.cfg:
-            for i, (c, _) in enumerate(LANGUAGES):
-                if c == self.cfg["target_lang"]: self.tc.current(i); break
+            code = self.cfg["target_lang"]
+            for c, n in LANGUAGES:
+                if c == code:
+                    self.tc.set(f"{c}  {n}"); break
         if "source_lang" in self.cfg:
             v = self.cfg["source_lang"]
             if v == "auto":
-                self.sc.current(0)
+                self.sc.set("auto  자동 감지")
             else:
-                for i, (c, _) in enumerate(LANGUAGES):
-                    if c == v: self.sc.current(i + 1); break
+                for c, n in LANGUAGES:
+                    if c == v:
+                        self.sc.set(f"{c}  {n}"); break
 
     def _src(self):
         v = self.sc.get()
@@ -674,15 +726,19 @@ class App:
         return self.tc.get().split()[0]
 
     def _hover(self, on):
-        bg = C["drop_hl"] if on else C["drop"]
-        for w in (self.df, self.di, self.dl): w.config(bg=bg)
+        bg = _DROP_HL if on else _DROP_BG
+        bd = _ACCENT  if on else _BORDER
+        for w in (self.df, self.di, self.dl):
+            w.config(bg=bg)
+        self.df.config(highlightbackground=bd)
 
     def _set_in(self, path):
         self.iv.set(path)
         p = Path(path)
         self.ov.set(str(p.parent / f"{p.stem}_{self._tgt()}.pdf"))
-        self.dl.config(text=p.name, fg=C["fg"])
+        self.dl.config(text=p.name, fg=_FG)
         self.di.config(text="✅")
+        self.df.config(highlightbackground=_ACCENT)
 
     def _drop(self, e):
         p = normalize_drop(e.data)
@@ -697,34 +753,71 @@ class App:
 
     def _pick_in(self):
         p = filedialog.askopenfilename(title="번역할 PDF 선택",
-                                       filetypes=[("PDF","*.pdf"),("모두","*.*")])
+                                       filetypes=[("PDF", "*.pdf"), ("모두", "*.*")])
         if p: self._set_in(p)
 
     def _pick_out(self):
         p = filedialog.asksaveasfilename(title="출력 파일", defaultextension=".pdf",
-                                         filetypes=[("PDF","*.pdf")])
+                                         filetypes=[("PDF", "*.pdf")])
         if p: self.ov.set(p)
 
     def _log(self, msg, tag=""):
+        ts = time.strftime("[%H:%M:%S] ")
         def _w():
-            self.log.config(state=tk.NORMAL)
-            self.log.insert(tk.END, msg + "\n", tag)
-            self.log.see(tk.END)
-            self.log.config(state=tk.DISABLED)
+            tw = self.log._textbox
+            tw.configure(state="normal")
+            tw.insert(tk.END, ts, "ts")
+            tw.insert(tk.END, msg + "\n", tag if tag else ())
+            tw.see(tk.END)
+            tw.configure(state="disabled")
         self.root.after(0, _w)
 
+    # ── 진행률 애니메이션 (main 스레드 루프) ─────────────────────────────────
     def _set_pct(self, pct, status=""):
-        def _w():
-            self.pbar["value"] = pct
-            self.pct_lbl.config(text=f"{int(pct)}%")
-            if status:
-                self.status.config(text=status)
-        self.root.after(0, _w)
+        """백그라운드 스레드에서 호출. 타겟값만 갱신 (root.after 없음)."""
+        self._pct_target = float(pct)
+        if status:
+            self._pct_status = status
+
+    def _start_anim(self):
+        """번역 시작 시 main 스레드에서 1회 호출."""
+        self._pct_target = 0.0
+        self._pct_status = "시작 중..."
+        self._anim_on    = True
+        self._anim_tick()
+
+    def _stop_anim(self):
+        self._anim_on = False
+        target = getattr(self, '_pct_target', 0.0)
+        self.pbar.set(target / 100)
+        self.pct_lbl.configure(text=f"{int(round(target))}%")
+
+    def _anim_tick(self):
+        if not getattr(self, '_anim_on', False):
+            return
+        target  = getattr(self, '_pct_target', 0.0)
+        status  = getattr(self, '_pct_status',  "")
+        current = self.pbar.get() * 100
+
+        if status:
+            self.status.configure(text=status)
+            self._pct_status = ""
+
+        diff = target - current
+        if abs(diff) > 0.3:
+            nv = current + diff * 0.15
+            self.pbar.set(nv / 100)
+            self.pct_lbl.configure(text=f"{int(round(nv))}%")
+
+        self.root.after(16, self._anim_tick)  # 60fps 루프
 
     def _set_running(self, on):
-        self.btn.config(state=tk.DISABLED if on else tk.NORMAL)
-        self.cbtn.config(state=tk.NORMAL if on else tk.DISABLED)
-        # 완료 후 progress는 100% 유지 — 다음 번역 시작 시 _start()에서 리셋
+        self.btn.configure(state="disabled" if on else "normal")
+        self.cbtn.configure(
+            state="normal" if on else "disabled",
+            text_color=_FG if on else _SUBTLE)
+        if not on:
+            self._stop_anim()
 
     def _do_cancel(self):
         self._cancel.set()
@@ -745,97 +838,142 @@ class App:
 
         save_config({"target_lang": self._tgt(), "source_lang": self._src()})
         self._cancel.clear()
-        self._set_pct(0, "시작 중...")   # 새 번역 시작 시 리셋
-        self.root.after(0, lambda: self._set_running(True))
-        self.log.config(state=tk.NORMAL)
-        self.log.delete("1.0", tk.END)
-        self.log.config(state=tk.DISABLED)
-        self._set_pct(0, "시작 중...")
+        self._set_running(True)
+        tw = self.log._textbox
+        tw.configure(state="normal"); tw.delete("1.0", tk.END); tw.configure(state="disabled")
+        self._start_anim()
 
         threading.Thread(target=self._worker,
                          args=(inp, out, self._src(), self._tgt()),
                          daemon=True).start()
 
     def _worker(self, inp, out, src, tgt):
+        self._log("라이브러리 로딩 중...", "info")
         try:
-            from pdf2docx import Converter
-            from docx import Document
+            import fitz
             from deep_translator import GoogleTranslator  # noqa
         except ImportError as e:
             self._log(f"패키지 오류: {e}", "err")
             self.root.after(0, lambda: self._set_running(False)); return
-
-        tmp = tempfile.mktemp(suffix=".docx")
-        tmp_translated = tempfile.mktemp(suffix=".docx")
+        self._log("로딩 완료.", "ok")
 
         try:
-            # ── 1단계: PDF → DOCX ─────────────────────────────────────────
-            self._set_pct(2, "1/3  PDF 변환 중...")
-            self._log(f"[1/3] PDF → DOCX 변환 중: {Path(inp).name}", "info")
+            # ── 1단계: 텍스트 추출 ────────────────────────────────────────
+            self._set_pct(2, "1/3  텍스트 추출 중...")
+            self._log(f"[1/3] {Path(inp).name} — 텍스트 추출", "info")
 
-            # fitz로 페이지 수 파악
-            import fitz as _fitz
-            with _fitz.open(inp) as _pdf:
-                total_pages = len(_pdf)
+            doc = fitz.open(inp)
+            total_pages = len(doc)
             self._log(f"  총 {total_pages}페이지")
 
-            # 변환 중 진행률 애니메이션 (2 → 24%)
-            # pdf2docx는 변환 콜백을 지원하지 않으므로 시간 기반으로 추정
-            conv_done = threading.Event()
-            estimated_sec = max(total_pages * 0.25, 5)
+            # 한국어/CJK 폰트 탐색
+            _ko_candidates = [
+                "C:/Windows/Fonts/malgun.ttf",
+                "C:/Windows/Fonts/gulim.ttc",
+                "C:/Windows/Fonts/batang.ttc",
+                "C:/Windows/Fonts/NanumGothic.ttf",
+            ]
+            ko_font = next((f for f in _ko_candidates if os.path.exists(f)), None)
+            if ko_font:
+                self._log(f"  폰트: {os.path.basename(ko_font)}", "info")
+            else:
+                self._log("  경고: 한국어 폰트를 찾을 수 없음 (기본 폰트 사용)", "warn")
 
-            def _anim():
-                t0 = time.time()
-                while not conv_done.is_set():
-                    elapsed = time.time() - t0
-                    pct = min(24, 2 + elapsed / estimated_sec * 22)
-                    self._set_pct(pct, f"1/3  PDF 변환 중... ({int(elapsed)}초 경과 / {total_pages}페이지)")
-                    time.sleep(0.4)
+            # 페이지별 block 수집 (block 단위 번역 → 문장 잘림 방지)
+            page_blocks = []
+            for pidx in range(total_pages):
+                page   = doc[pidx]
+                raw_blks = page.get_text("dict",
+                                         flags=fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
+                result = []
+                for blk in raw_blks:
+                    if blk.get("type") != 0:
+                        continue
+                    spans = []
+                    for line in blk["lines"]:
+                        for sp in line["spans"]:
+                            clean = " ".join(sp["text"].split())
+                            if clean:
+                                spans.append({**sp, "text": clean})
+                    if not spans:
+                        continue
+                    result.append({
+                        "text":  " ".join(sp["text"] for sp in spans),
+                        "spans": spans,
+                        "bbox":  fitz.Rect(blk["bbox"]),
+                    })
+                page_blocks.append(result)
 
-            threading.Thread(target=_anim, daemon=True).start()
+            all_texts = [b["text"] for pb in page_blocks for b in pb]
+            self._log(f"  블록 {len(all_texts)}개 발견")
+            self._set_pct(10, "2/3  번역 중...")
 
-            cv = Converter(inp)
-            cv.convert(tmp, start=0, end=None)
-            cv.close()
-            conv_done.set()
-            self._log("  변환 완료", "ok")
-            self._set_pct(25, "2/3  번역 중...")
-
-            if self._cancel.is_set(): raise InterruptedError()
+            if self._cancel.is_set():
+                raise InterruptedError()
 
             # ── 2단계: 번역 ────────────────────────────────────────────────
             self._log(f"[2/3] 번역 중  ({src} → {tgt})...", "info")
 
-            doc   = Document(tmp)
-            items = collect_paragraphs(doc)
-            texts = [p.text for p, _ in items]
-            non_empty_count = sum(1 for t in texts if t.strip())
-            self._log(f"  단락 수: {non_empty_count}개")
-
-            done_ref = [0]
-
             def prog_cb(done, total):
-                done_ref[0] = done
-                pct = 25 + done / max(total, 1) * 65
-                self._set_pct(pct, f"2/3  번역 중... {done}/{total} 단락")
+                self._set_pct(10 + done / max(total, 1) * 75,
+                              f"2/3  번역 중... {done}/{total}")
 
             translated = translate_paragraphs_parallel(
-                texts, src, tgt, prog_cb, self._cancel
-            )
+                all_texts, src, tgt, prog_cb, self._cancel)
 
-            if self._cancel.is_set(): raise InterruptedError()
+            if self._cancel.is_set():
+                raise InterruptedError()
 
-            apply_translations(doc, items, translated)
-            doc.save(tmp_translated)
             self._log("  번역 완료", "ok")
-            self._set_pct(90, "3/3  PDF 저장 중...")
+            self._set_pct(85, "3/3  PDF 저장 중...")
 
-            # ── 3단계: DOCX → PDF ──────────────────────────────────────────
-            self._log("[3/3] PDF 저장 중...", "info")
-            _docx_to_pdf(tmp_translated, out, self._log)
+            # ── 3단계: 텍스트 교체 & 저장 ──────────────────────────────────
+            self._log("[3/3] 번역 텍스트 삽입 중...", "info")
+
+            b_idx = 0
+            for pidx in range(total_pages):
+                page  = doc[pidx]
+                pblks = page_blocks[pidx]
+                if not pblks:
+                    continue
+
+                # 원본 span 영역 제거 (배경·이미지 보존)
+                for blk in pblks:
+                    for sp in blk["spans"]:
+                        page.add_redact_annot(fitz.Rect(sp["bbox"]), fill=None)
+                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+
+                for i, blk in enumerate(pblks):
+                    t_text = translated[b_idx + i]
+                    if not t_text or not t_text.strip():
+                        continue
+
+                    spans = blk["spans"]
+                    size  = min(s["size"] for s in spans)
+                    raw_c = spans[0].get("color", 0)
+                    color = (((raw_c >> 16) & 0xFF) / 255,
+                             ((raw_c >> 8)  & 0xFF) / 255,
+                             (raw_c & 0xFF) / 255) if isinstance(raw_c, int) else (raw_c or (0, 0, 0))
+
+                    kw = dict(fontsize=size, color=color, align=fitz.TEXT_ALIGN_LEFT)
+                    if ko_font:
+                        kw["fontfile"] = ko_font
+                        kw["fontname"] = "KoFont"
+
+                    # 원본 bbox에 맞도록 폰트 축소 (최소 6pt)
+                    rc = page.insert_textbox(blk["bbox"], t_text, **kw)
+                    while rc < 0 and size > 6:
+                        size -= 0.5
+                        kw["fontsize"] = size
+                        rc = page.insert_textbox(blk["bbox"], t_text, **kw)
+
+                b_idx += len(pblks)
+
+            doc.save(out, deflate=True, garbage=4)
+            doc.close()
 
             self._set_pct(100, "완료!")
-            self._log(f"\n번역 완료!", "ok")
+            self._log("\n번역 완료!", "ok")
             self._log(f"저장: {out}", "ok")
             self.root.after(0, lambda: messagebox.showinfo(
                 "완료", f"번역 완료!\n\n{out}"))
@@ -848,9 +986,6 @@ class App:
             self._log(f"오류: {msg}", "err")
             self.root.after(0, lambda m=msg: messagebox.showerror("오류", m))
         finally:
-            for f in (tmp, tmp_translated):
-                try: os.remove(f)
-                except Exception: pass
             self.root.after(0, lambda: self._set_running(False))
 
     def run(self):
