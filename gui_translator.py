@@ -56,6 +56,61 @@ _DROP_BG = "#111f35"
 _DROP_HL = "#182d4a"
 
 # ─────────────────────────────────────────────────────────────────────────────
+LINE_HEIGHT_RATIO = 1.75   # 한국어 출판 표준 행간 (ref_design 기준)
+PARA_GAP_RATIO   = 0.6    # 단락 사이 추가 여백 (행간의 배수)
+
+
+def _wrap_lines(text, bbox_w, font, fontsize):
+    """텍스트를 bbox_w 폭으로 줄바꿈. URL 등 긴 단어는 문자 단위 분할."""
+    def _char_split(w):
+        parts, part = [], ""
+        for ch in w:
+            if font.text_length(part + ch, fontsize) <= bbox_w:
+                part += ch
+            else:
+                if part:
+                    parts.append(part)
+                part = ch
+        if part:
+            parts.append(part)
+        return parts
+
+    words = text.split()
+    lines, cur = [], ""
+    for w in words:
+        test = (cur + " " + w).strip()
+        if font.text_length(test, fontsize) <= bbox_w:
+            cur = test
+        else:
+            if cur:
+                lines.append(cur)
+            if font.text_length(w, fontsize) > bbox_w:
+                parts = _char_split(w)
+                lines.extend(parts[:-1])
+                cur = parts[-1] if parts else ""
+            else:
+                cur = w
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _insert_ko_text(page, bbox, text, font, fontsize, color=(0, 0, 0)):
+    """TextWriter로 bbox 내에 한국어 텍스트를 줄바꿈하여 삽입."""
+    import fitz as _fitz
+    lines = _wrap_lines(text, bbox.x1 - bbox.x0, font, fontsize)
+    lh    = fontsize * LINE_HEIGHT_RATIO
+    y     = bbox.y0 + fontsize
+    tw    = _fitz.TextWriter(page.rect, color=color)
+    for line in lines:
+        if y > bbox.y1:
+            break
+        tw.append((bbox.x0, y), line, font=font, fontsize=fontsize)
+        y += lh
+    tw.write_text(page)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 def load_config():
     try:
         if CONFIG_FILE.exists():
@@ -866,18 +921,22 @@ class App:
             total_pages = len(doc)
             self._log(f"  총 {total_pages}페이지")
 
-            # 한국어/CJK 폰트 탐색
+            # 한국어/CJK 폰트 탐색 → fitz.Font 객체로 로드
+            # 우선순위: 출판용 명조(가독성 최상) → 나눔명조 → 바탕 → 맑은 고딕
             _ko_candidates = [
-                "C:/Windows/Fonts/malgun.ttf",
-                "C:/Windows/Fonts/gulim.ttc",
+                "C:/Windows/Fonts/KoPubBatangMedium.ttf",
+                "C:/Windows/Fonts/NanumMyeongjo.ttf",
+                "C:/Windows/Fonts/HANBatang.ttf",
                 "C:/Windows/Fonts/batang.ttc",
-                "C:/Windows/Fonts/NanumGothic.ttf",
+                "C:/Windows/Fonts/malgun.ttf",
             ]
-            ko_font = next((f for f in _ko_candidates if os.path.exists(f)), None)
-            if ko_font:
-                self._log(f"  폰트: {os.path.basename(ko_font)}", "info")
+            ko_font_path = next((f for f in _ko_candidates if os.path.exists(f)), None)
+            if ko_font_path:
+                ko_font = fitz.Font(fontfile=ko_font_path)
+                self._log(f"  폰트: {os.path.basename(ko_font_path)}", "info")
             else:
-                self._log("  경고: 한국어 폰트를 찾을 수 없음 (기본 폰트 사용)", "warn")
+                ko_font = fitz.Font("cjk")
+                self._log("  경고: 한국어 TTF 없음 → 내장 CJK 폰트 사용", "warn")
 
             # 페이지별 block 수집 (block 단위 번역 → 문장 잘림 방지)
             page_blocks = []
@@ -930,44 +989,139 @@ class App:
             # ── 3단계: 텍스트 교체 & 저장 ──────────────────────────────────
             self._log("[3/3] 번역 텍스트 삽입 중...", "info")
 
-            b_idx = 0
+            # ── 사전 수집: 이미지 블록 위치 & 특수 페이지 판별 ──────────────
+            SPECIAL_CHARS = 400   # 원본 텍스트 이 미만 → 표지·챕터 오프너 등 특수 페이지
+            page_img_rects  = []  # 각 페이지의 이미지 bbox 목록
+            special_pages   = set()
+
+            for pidx in range(total_pages):
+                raw_blks = doc[pidx].get_text(
+                    "dict",
+                    flags=fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_PRESERVE_IMAGES
+                )["blocks"]
+                imgs = [fitz.Rect(b["bbox"]) for b in raw_blks if b.get("type") == 1]
+                page_img_rects.append(imgs)
+                total_chars = sum(len(blk["text"]) for blk in page_blocks[pidx])
+                if total_chars < SPECIAL_CHARS:
+                    special_pages.add(pidx)
+
+            # 원본 텍스트 일괄 제거
             for pidx in range(total_pages):
                 page  = doc[pidx]
                 pblks = page_blocks[pidx]
                 if not pblks:
                     continue
-
-                # 원본 span 영역 제거 (배경·이미지 보존)
                 for blk in pblks:
                     for sp in blk["spans"]:
                         page.add_redact_annot(fitz.Rect(sp["bbox"]), fill=None)
                 page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
 
-                for i, blk in enumerate(pblks):
-                    t_text = translated[b_idx + i]
+            # 페이지별 텍스트 영역 추출
+            def _content_area(pblks):
+                if not pblks:
+                    return None
+                bboxes = [blk["bbox"] for blk in pblks]
+                return (min(b.x0 for b in bboxes), max(b.x1 for b in bboxes),
+                        min(b.y0 for b in bboxes), max(b.y1 for b in bboxes))
+
+            page_areas = [_content_area(page_blocks[p]) for p in range(total_pages)]
+            valid_areas = [a for a in page_areas if a]
+            def _med(lst): s = sorted(lst); return s[len(s) // 2]
+            std_area = (_med([a[0] for a in valid_areas]),
+                        _med([a[1] for a in valid_areas]),
+                        _med([a[2] for a in valid_areas]),
+                        _med([a[3] for a in valid_areas]),
+                        ) if valid_areas else (50, 550, 50, 750)
+
+            # 번역 아이템: 정규 큐 / 특수 페이지 맵으로 분리
+            regular_q   = []          # 일반 페이지 아이템 (리플로우 대상)
+            special_map = {}          # {pidx: [items]} — 특수 페이지 전용
+
+            b_idx = 0
+            for pidx in range(total_pages):
+                for blk in page_blocks[pidx]:
+                    t_text = translated[b_idx]; b_idx += 1
                     if not t_text or not t_text.strip():
                         continue
-
                     spans = blk["spans"]
-                    size  = min(s["size"] for s in spans)
+                    _sz_w = {}
+                    for s in spans:
+                        k = round(s["size"], 1)
+                        _sz_w[k] = _sz_w.get(k, 0) + len(s["text"])
+                    size  = max(_sz_w, key=_sz_w.get)
                     raw_c = spans[0].get("color", 0)
                     color = (((raw_c >> 16) & 0xFF) / 255,
-                             ((raw_c >> 8)  & 0xFF) / 255,
-                             (raw_c & 0xFF) / 255) if isinstance(raw_c, int) else (raw_c or (0, 0, 0))
+                             ((raw_c >>  8) & 0xFF) / 255,
+                             (raw_c & 0xFF) / 255) if isinstance(raw_c, int) \
+                             else (raw_c or (0, 0, 0))
+                    item = {"text": t_text, "size": size, "color": color}
+                    if pidx in special_pages:
+                        special_map.setdefault(pidx, []).append(item)
+                    else:
+                        regular_q.append(item)
 
-                    kw = dict(fontsize=size, color=color, align=fitz.TEXT_ALIGN_LEFT)
-                    if ko_font:
-                        kw["fontfile"] = ko_font
-                        kw["fontname"] = "KoFont"
+            # 페이지 리플로우
+            page_w = doc[0].rect.width
+            page_h = doc[0].rect.height
 
-                    # 원본 bbox에 맞도록 폰트 축소 (최소 6pt)
-                    rc = page.insert_textbox(blk["bbox"], t_text, **kw)
-                    while rc < 0 and size > 6:
-                        size -= 0.5
-                        kw["fontsize"] = size
-                        rc = page.insert_textbox(blk["bbox"], t_text, **kw)
+            def _get_area(pidx):
+                a = page_areas[pidx] if pidx < len(page_areas) and page_areas[pidx] \
+                    else std_area
+                ax0, ax1, ay0, ay1 = a
+                if pidx < len(page_img_rects):
+                    col = fitz.Rect(ax0, 0, ax1, page_h)
+                    for img_r in page_img_rects[pidx]:
+                        if img_r.intersects(col) and img_r.y0 < ay1:
+                            ay0 = max(ay0, img_r.y1 + 8)
+                return ax0, ax1, ay0, ay1
 
-                b_idx += len(pblks)
+            def _place_items(page, ax0, ax1, ay0, ay1, queue):
+                """queue에서 페이지에 들어갈 만큼 삽입. 잔여는 queue[0]에 남김."""
+                y = ay0
+                while queue:
+                    item = queue[0]
+                    size = item["size"]
+                    lh   = size * LINE_HEIGHT_RATIO
+                    gap  = size * PARA_GAP_RATIO
+                    bw   = max(ax1 - ax0, 1.0)
+                    if y + size > ay1:
+                        break
+                    lines    = _wrap_lines(item["text"], bw, ko_font, size)
+                    tw       = fitz.TextWriter(page.rect, color=item["color"])
+                    rendered = 0
+                    for line in lines:
+                        if y + size > ay1:
+                            break
+                        tw.append((ax0, y + size), line, font=ko_font, fontsize=size)
+                        y += lh; rendered += 1
+                    tw.write_text(page)
+                    if rendered < len(lines):
+                        queue[0] = {**item, "text": " ".join(lines[rendered:])}
+                        break
+                    else:
+                        queue.pop(0); y += gap
+
+            pidx = 0
+            while True:
+                if not regular_q and not special_map:
+                    break
+                if pidx >= len(doc):
+                    if not regular_q:
+                        break
+                    doc.new_page(width=page_w, height=page_h)
+
+                page = doc[pidx]
+                ax0, ax1, ay0, ay1 = _get_area(pidx)
+
+                if pidx in special_pages and pidx < total_pages:
+                    # 특수 페이지: 자기 아이템만 배치, overflow 받지 않음
+                    page_items = special_map.pop(pidx, [])
+                    _place_items(page, ax0, ax1, ay0, ay1, page_items)
+                else:
+                    # 일반 페이지: 정규 큐에서 리플로우
+                    _place_items(page, ax0, ax1, ay0, ay1, regular_q)
+
+                pidx += 1
 
             doc.save(out, deflate=True, garbage=4)
             doc.close()
