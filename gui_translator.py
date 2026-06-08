@@ -56,8 +56,32 @@ _DROP_BG = "#111f35"
 _DROP_HL = "#182d4a"
 
 # ─────────────────────────────────────────────────────────────────────────────
-LINE_HEIGHT_RATIO = 1.75   # 한국어 출판 표준 행간 (ref_design 기준)
-PARA_GAP_RATIO   = 0.6    # 단락 사이 추가 여백 (행간의 배수)
+LINE_HEIGHT_RATIO       = 1.75  # 한국어 출판 표준 행간
+LINE_HEIGHT_RATIO_LATIN = 1.65  # 라틴 계열 언어(영어·독어 등) 행간
+PARA_GAP_RATIO          = 0.6   # 단락 사이 추가 여백 (행간의 배수)
+
+KO_FONT_CANDIDATES = [
+    "C:/Windows/Fonts/KoPubBatangMedium.ttf",
+    "C:/Windows/Fonts/NanumMyeongjo.ttf",
+    "C:/Windows/Fonts/HANBatang.ttf",
+    "C:/Windows/Fonts/batang.ttc",
+    "C:/Windows/Fonts/malgun.ttf",
+]
+
+_CJK_LANG_PREFIXES = {"ko", "ja", "zh"}
+
+
+def _is_cjk_lang(lang_code: str) -> bool:
+    return lang_code.lower().split("-")[0] in _CJK_LANG_PREFIXES
+
+
+def _select_output_font(tgt_lang: str):
+    """대상 언어에 맞는 fitz.Font 반환. CJK → 한국어 TTF, 그 외 → Helvetica."""
+    import fitz as _fitz
+    if _is_cjk_lang(tgt_lang):
+        path = next((p for p in KO_FONT_CANDIDATES if os.path.exists(p)), None)
+        return _fitz.Font(fontfile=path) if path else _fitz.Font("cjk")
+    return _fitz.Font("helv")
 
 
 _tl_cache: dict = {}  # (text, fontsize) → float  단어/문자 폭 캐시
@@ -68,7 +92,7 @@ def _wrap_lines(text, bbox_w, font, fontsize):
     cache = _tl_cache
 
     def _tl(t):
-        k = (t, fontsize)
+        k = (font.name, t, fontsize)
         v = cache.get(k)
         if v is None:
             cache[k] = v = font.text_length(t, fontsize)
@@ -109,23 +133,28 @@ def _wrap_lines(text, bbox_w, font, fontsize):
     return lines
 
 
-def _insert_ko_text(page, bbox, text, font, fontsize, color=(0, 0, 0)):
-    """TextWriter로 bbox 내에 한국어 텍스트를 줄바꿈하여 삽입. bbox 초과 시 폰트 축소."""
+def _insert_ko_text(page, bbox, text, font, fontsize, color=(0, 0, 0),
+                    lh_ratio=LINE_HEIGHT_RATIO):
+    """TextWriter로 bbox 내에 텍스트를 줄바꿈하여 삽입. bbox 초과 시 폰트 축소."""
     import fitz as _fitz
     bw   = max(bbox.x1 - bbox.x0, 1.0)
     bh   = bbox.y1 - bbox.y0
     size = max(fontsize, 6.0)
     lines = _wrap_lines(text, bw, font, size)
+    # 1pt 하단 여백을 두어 셀 경계선 겹침 방지
+    bh_eff = max(bh - 1.0, bh * 0.9)
     while size > 6.0:
         lines = _wrap_lines(text, bw, font, size)
-        if len(lines) * size * LINE_HEIGHT_RATIO <= bh or size <= 6.0:
+        bh_eff = max(bh - 1.0, bh * 0.9)
+        if len(lines) * size * lh_ratio <= bh_eff or size <= 6.0:
             break
         size -= 0.5
-    lh = size * LINE_HEIGHT_RATIO
+    lh = size * lh_ratio
     y  = bbox.y0 + size
+    clip_y = bbox.y1 - size * 0.2  # 디센더가 경계선을 넘지 않도록 클립
     tw = _fitz.TextWriter(page.rect, color=color)
     for line in lines:
-        if y > bbox.y1:
+        if y > clip_y:
             break
         tw.append((bbox.x0, y), line, font=font, fontsize=size)
         y += lh
@@ -943,22 +972,14 @@ class App:
             total_pages = len(doc)
             self._log(f"  총 {total_pages}페이지")
 
-            # 한국어/CJK 폰트 탐색 → fitz.Font 객체로 로드
-            # 우선순위: 출판용 명조(가독성 최상) → 나눔명조 → 바탕 → 맑은 고딕
-            _ko_candidates = [
-                "C:/Windows/Fonts/KoPubBatangMedium.ttf",
-                "C:/Windows/Fonts/NanumMyeongjo.ttf",
-                "C:/Windows/Fonts/HANBatang.ttf",
-                "C:/Windows/Fonts/batang.ttc",
-                "C:/Windows/Fonts/malgun.ttf",
-            ]
-            ko_font_path = next((f for f in _ko_candidates if os.path.exists(f)), None)
-            if ko_font_path:
-                ko_font = fitz.Font(fontfile=ko_font_path)
-                self._log(f"  폰트: {os.path.basename(ko_font_path)}", "info")
+            # 대상 언어에 맞는 폰트 선택 (CJK → 한국어 명조, 그 외 → Helvetica)
+            ko_font = _select_output_font(tgt)
+            if _is_cjk_lang(tgt):
+                _loaded = next((p for p in KO_FONT_CANDIDATES if os.path.exists(p)), None)
+                self._log(f"  폰트: {os.path.basename(_loaded) if _loaded else 'CJK 내장'}", "info")
             else:
-                ko_font = fitz.Font("cjk")
-                self._log("  경고: 한국어 TTF 없음 → 내장 CJK 폰트 사용", "warn")
+                self._log("  폰트: Helvetica (라틴 출력)", "info")
+            _lh_ratio = LINE_HEIGHT_RATIO if _is_cjk_lang(tgt) else LINE_HEIGHT_RATIO_LATIN
 
             # 페이지별 block 수집 (block 단위 번역 → 문장 잘림 방지)
             page_blocks = []
@@ -1026,15 +1047,19 @@ class App:
                 imgs = [fitz.Rect(b["bbox"]) for b in raw_blks if b.get("type") == 1]
                 page_img_rects.append(imgs)
 
-                # 벡터 드로잉 영역 수집 (페이지 내 유효 면적 500pt² 이상, 배경 fill 80% 초과 제외)
+                # 벡터 드로잉 영역 수집 (500pt² 이상, 배경 fill 80% 미만, 얇은 가로줄 제외)
                 drawings = doc[pidx].get_drawings()
                 _page_rect = doc[pidx].rect
                 _page_area = _page_rect.get_area()
                 sig = []
                 for _d in drawings:
-                    _clipped = (fitz.Rect(_d["rect"]) & _page_rect).get_area()
+                    _r = fitz.Rect(_d["rect"])
+                    # 얇은 가로줄(표 행 배경): 높이 < 30pt 이고 폭이 높이의 5배 초과 → 제외
+                    if _r.height < 30 and _r.width > _r.height * 5:
+                        continue
+                    _clipped = (_r & _page_rect).get_area()
                     if 500 <= _clipped < _page_area * 0.8:
-                        sig.append(fitz.Rect(_d["rect"]))
+                        sig.append(_r)
                 if sig:
                     dz = sig[0]
                     for r in sig[1:]: dz |= r
@@ -1045,6 +1070,20 @@ class App:
                 total_chars = sum(len(blk["text"]) for blk in page_blocks[pidx])
                 if total_chars < SPECIAL_CHARS:
                     special_pages.add(pidx)
+
+            # 배경 이미지 판별: 텍스트 블록 3개 이상 겹치면 배경(표 행 음영 등) → inplace·skip 제외
+            _BG_THRESH = 3
+            background_imgs = []
+            for pidx in range(total_pages):
+                bg = set()
+                for i_idx, img_r in enumerate(page_img_rects[pidx]):
+                    cnt = sum(
+                        1 for blk in page_blocks[pidx]
+                        if (blk["bbox"] & img_r).get_area() > blk["bbox"].get_area() * 0.4
+                    )
+                    if cnt >= _BG_THRESH:
+                        bg.add(i_idx)
+                background_imgs.append(bg)
 
             # 원본 텍스트 일괄 제거
             for pidx in range(total_pages):
@@ -1059,19 +1098,35 @@ class App:
                         page.add_redact_annot(fitz.Rect(sp["bbox"]), fill=None)
                 page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
 
-            # 페이지별 텍스트 영역 추출
+            # 배경 이미지 white cover: 이미지에 구워진 원본 텍스트 픽셀 제거
+            for pidx in range(total_pages):
+                bg_list = [page_img_rects[pidx][i] for i in background_imgs[pidx]]
+                if bg_list:
+                    page = doc[pidx]
+                    for img_r in bg_list:
+                        page.add_redact_annot(img_r, fill=(1, 1, 1))
+                    page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
+
+            # ── 문서 전체 컬럼 경계 도출 ──────────────────────────────────────
+            # 페이지마다 min(x0)를 쓰면 헤더/푸터(x≈18) 블록이 컬럼 기준을 오염.
+            # 전체 블록의 x0 최빈값을 문서 단위로 한 번만 계산해 사용.
+            from collections import Counter as _Ctr
+            _all_x0 = [round(blk["bbox"].x0) for pb in page_blocks for blk in pb]
+            _all_x1 = [round(blk["bbox"].x1) for pb in page_blocks for blk in pb]
+            doc_ax0 = _Ctr(_all_x0).most_common(1)[0][0] if _all_x0 else 50
+            doc_ax1 = _Ctr(_all_x1).most_common(1)[0][0] if _all_x1 else 550
+
             def _content_area(pblks):
                 if not pblks:
                     return None
                 bboxes = [blk["bbox"] for blk in pblks]
-                return (min(b.x0 for b in bboxes), max(b.x1 for b in bboxes),
+                return (doc_ax0, doc_ax1,
                         min(b.y0 for b in bboxes), max(b.y1 for b in bboxes))
 
             page_areas = [_content_area(page_blocks[p]) for p in range(total_pages)]
             valid_areas = [a for a in page_areas if a]
             def _med(lst): s = sorted(lst); return s[len(s) // 2]
-            std_area = (_med([a[0] for a in valid_areas]),
-                        _med([a[1] for a in valid_areas]),
+            std_area = (doc_ax0, doc_ax1,
                         _med([a[2] for a in valid_areas]),
                         _med([a[3] for a in valid_areas]),
                         ) if valid_areas else (50, 550, 50, 750)
@@ -1081,14 +1136,23 @@ class App:
             special_map = {}          # {pidx: [items]} — 특수 페이지 전용
             inplace_map = {}          # {pidx: [(bbox, text, size, color)]} — 드로잉 영역 내 텍스트
 
-            def _is_inplace(blk_bbox, pidx):
-                """블록이 그래픽(이미지·벡터 드로잉) 영역과 40% 이상 겹치면 인플레이스 처리."""
+            def _is_inplace(blk_bbox, pidx, blk=None):
+                """블록이 그래픽(이미지·벡터 드로잉) 영역과 40% 이상 겹치면 인플레이스 처리.
+                블록 전체 bbox가 못 잡는 경우 스팬 단위로도 검사."""
                 blk_area = blk_bbox.get_area()
                 if blk_area <= 0:
                     return False
                 for img_r in page_img_rects[pidx]:
                     if (blk_bbox & img_r).get_area() > blk_area * 0.4:
                         return True
+                    # 블록이 이미지 경계에 걸쳐있을 때 스팬 단위 검사
+                    if blk:
+                        for ln in blk.get("lines", []):
+                            for sp in ln.get("spans", []):
+                                sp_r = fitz.Rect(sp["bbox"])
+                                sp_a = sp_r.get_area()
+                                if sp_a > 0 and (sp_r & img_r).get_area() > sp_a * 0.5:
+                                    return True
                 if pidx < len(page_draw_zones):
                     dz = page_draw_zones[pidx]
                     if not dz.is_empty and (blk_bbox & dz).get_area() > blk_area * 0.4:
@@ -1115,7 +1179,7 @@ class App:
                     item = {"text": t_text, "size": size, "color": color}
                     if pidx in special_pages:
                         special_map.setdefault(pidx, []).append(item)
-                    elif _is_inplace(blk["bbox"], pidx):
+                    elif _is_inplace(blk["bbox"], pidx, blk):
                         inplace_map.setdefault(pidx, []).append(
                             (blk["bbox"], t_text, size, color)
                         )
@@ -1140,31 +1204,45 @@ class App:
                 a = page_areas[pidx] if pidx < len(page_areas) and page_areas[pidx] \
                     else std_area
                 ax0, ax1, ay0, ay1 = a
-                orig_ay0 = ay0
-                col = fitz.Rect(ax0, 0, ax1, page_h)
-                if pidx < len(page_img_rects):
-                    for img_r in page_img_rects[pidx]:
-                        if img_r.intersects(col) and img_r.y0 < ay1:
-                            ay0 = max(ay0, img_r.y1 + 8)
-                if pidx < len(page_draw_zones):
-                    dz = page_draw_zones[pidx]
-                    if not dz.is_empty and dz.intersects(col) and dz.y0 < ay1:
-                        ay0 = max(ay0, dz.y1 + 8)
-                # 드로잉이 콘텐츠 영역 전체를 덮으면 원래 ay0으로 복원
-                if ay1 - ay0 < 30:
-                    ay0 = orig_ay0
                 return ax0, ax1, ay0, ay1
 
-            def _place_items(page, ax0, ax1, ay0, ay1, queue):
-                """queue에서 페이지에 들어갈 만큼 삽입. 잔여는 queue[0]에 남김."""
-                y    = ay0
-                tws  = {}   # color → TextWriter  (페이지당 write_text 최소화)
+            def _place_items(page, ax0, ax1, ay0, ay1, queue, pidx_=None):
+                """queue에서 페이지에 들어갈 만큼 삽입. 잔여는 queue[0]에 남김.
+                이미지·draw_zone 위를 지나는 y는 해당 영역 아래로 건너뜀."""
+                col = fitz.Rect(ax0, ay0, ax1, ay1)
+                skips = sorted(
+                    [r for r in (page_img_rects[pidx_] if pidx_ is not None
+                                 and pidx_ < len(page_img_rects) else [])
+                     if r.intersects(col)],
+                    key=lambda r: r.y0
+                )
+                # draw_zone(표·다이어그램)도 skip 대상에 포함
+                if pidx_ is not None and pidx_ < len(page_draw_zones):
+                    dz = page_draw_zones[pidx_]
+                    if not dz.is_empty and dz.intersects(col):
+                        skips.append(dz)
+                        skips.sort(key=lambda r: r.y0)
+
+                def _skip(y, sz=0):
+                    """텍스트 박스 [y, y+sz]가 이미지 rect와 겹치면 rect 아래로 이동."""
+                    changed = True
+                    while changed:
+                        changed = False
+                        for r in skips:
+                            if y < r.y1 and y + sz >= r.y0:
+                                y = r.y1 + 4
+                                changed = True
+                    return y
+
+                y    = _skip(ay0)
+                tws  = {}
                 bw   = max(ax1 - ax0, 1.0)
                 while queue:
                     item = queue[0]
                     size = item["size"]
-                    lh   = size * LINE_HEIGHT_RATIO
+                    lh   = size * _lh_ratio
                     gap  = size * PARA_GAP_RATIO
+                    y = _skip(y, lh)
                     if y + size > ay1:
                         break
                     lines    = _wrap_lines(item["text"], bw, ko_font, size)
@@ -1174,6 +1252,7 @@ class App:
                     tw       = tws[color]
                     rendered = 0
                     for line in lines:
+                        y = _skip(y, lh)
                         if y + size > ay1:
                             break
                         tw.append((ax0, y + size), line, font=ko_font, fontsize=size)
@@ -1203,18 +1282,27 @@ class App:
                 if pidx in special_pages and pidx < total_pages:
                     # 특수 페이지: 자기 아이템만 배치, overflow 받지 않음
                     page_items = special_map.pop(pidx, [])
-                    _place_items(page, ax0, ax1, ay0, ay1, page_items)
+                    _place_items(page, ax0, ax1, ay0, ay1, page_items, pidx_=pidx)
                 else:
                     # 일반 페이지: 정규 큐에서 리플로우
-                    _place_items(page, ax0, ax1, ay0, ay1, regular_q)
+                    _place_items(page, ax0, ax1, ay0, ay1, regular_q, pidx_=pidx)
 
                 pidx += 1
+
+            # 인플레이스 셀의 이미지 픽셀에서 원문 한글 제거
+            # PDF_REDACT_IMAGE_PIXELS: 래스터 이미지 픽셀까지 실제로 덮어씀
+            for ip_pidx, items in inplace_map.items():
+                page = doc[ip_pidx]
+                for bbox, _t, _s, _c in items:
+                    page.add_redact_annot(fitz.Rect(bbox), fill=(1, 1, 1))
+                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
 
             # 드로잉 영역 내 텍스트를 원래 위치에 삽입 (인플레이스)
             for ip_pidx, items in inplace_map.items():
                 page = doc[ip_pidx]
                 for bbox, text, size, color in items:
-                    _insert_ko_text(page, bbox, text, ko_font, size, color)
+                    _insert_ko_text(page, bbox, text, ko_font, size, color,
+                                    lh_ratio=_lh_ratio)
 
             self._set_pct(99, "3/3  저장 중...")
             doc.save(out, deflate=True, garbage=4)
