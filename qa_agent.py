@@ -15,7 +15,7 @@ from gui_translator import (translate_paragraphs_parallel,
                             _wrap_lines, LINE_HEIGHT_RATIO, PARA_GAP_RATIO)
 
 # ── 설정 ────────────────────────────────────────────────────────────────────
-TEST_PDF   = Path(__file__).parent / "evaluation" / "_OceanofPDF.com_The_Geek_Way_-_Andrew_McAfee.pdf"
+TEST_PDF   = Path(__file__).parent / "evaluation" / "The Geek Way_original.pdf"
 OUTPUT_DIR = Path(__file__).parent / "evaluation" / "qa_output"
 QA_PAGES   = 346        # 번역할 페이지 수 (전체)
 SRC_LANG   = "en"
@@ -80,14 +80,29 @@ def translate_pdf(inp: Path, out: Path, max_pages: int):
     print("[3/3] 텍스트 삽입 중...")
 
     SPECIAL_CHARS = 400
-    page_img_rects = []
-    special_pages  = set()
+    page_img_rects  = []
+    page_draw_zones = []
+    special_pages   = set()
     for pidx in range(total):
         raw_blks = doc[pidx].get_text(
             "dict", flags=fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_PRESERVE_IMAGES
         )["blocks"]
         imgs = [fitz.Rect(b["bbox"]) for b in raw_blks if b.get("type") == 1]
         page_img_rects.append(imgs)
+        drawings = doc[pidx].get_drawings()
+        _page_rect = doc[pidx].rect
+        _page_area = _page_rect.get_area()
+        sig = []
+        for _d in drawings:
+            _clipped = (fitz.Rect(_d["rect"]) & _page_rect).get_area()
+            if 500 <= _clipped < _page_area * 0.8:
+                sig.append(fitz.Rect(_d["rect"]))
+        if sig:
+            dz = sig[0]
+            for r in sig[1:]: dz |= r
+            page_draw_zones.append(dz)
+        else:
+            page_draw_zones.append(fitz.Rect())
         if sum(len(blk["text"]) for blk in page_blocks[pidx]) < SPECIAL_CHARS:
             special_pages.add(pidx)
 
@@ -113,8 +128,22 @@ def translate_pdf(inp: Path, out: Path, max_pages: int):
                 _med([a[2] for a in valid]), _med([a[3] for a in valid])) if valid \
                else (50, 550, 50, 750)
 
+    def _is_inplace(blk_bbox, pidx):
+        blk_area = blk_bbox.get_area()
+        if blk_area <= 0:
+            return False
+        for img_r in page_img_rects[pidx]:
+            if (blk_bbox & img_r).get_area() > blk_area * 0.4:
+                return True
+        if pidx < len(page_draw_zones):
+            dz = page_draw_zones[pidx]
+            if not dz.is_empty and (blk_bbox & dz).get_area() > blk_area * 0.4:
+                return True
+        return False
+
     regular_q   = []
     special_map = {}
+    inplace_map = {}
     b_idx = 0
     for pidx in range(total):
         for blk in page_blocks[pidx]:
@@ -131,40 +160,65 @@ def translate_pdf(inp: Path, out: Path, max_pages: int):
             item = {"text": t_text, "size": size, "color": color}
             if pidx in special_pages:
                 special_map.setdefault(pidx, []).append(item)
+            elif _is_inplace(blk["bbox"], pidx):
+                inplace_map.setdefault(pidx, []).append((blk["bbox"], t_text, size, color))
             else:
                 regular_q.append(item)
+
+    # 본문 크기 정규화: 최빈 크기를 body_size로 정의하고
+    # body_size ±2pt 이내 항목을 통일 (chapter 내 글자 불규칙 방지)
+    if regular_q:
+        from collections import Counter
+        size_counts = Counter(round(item["size"]) for item in regular_q)
+        body_size = float(size_counts.most_common(1)[0][0])
+        for item in regular_q:
+            if abs(item["size"] - body_size) <= 2.0:
+                item["size"] = body_size
 
     page_w = doc[0].rect.width; page_h = doc[0].rect.height
 
     def _get_area(pidx):
         a = page_areas[pidx] if pidx < len(page_areas) and page_areas[pidx] else std_area
         ax0, ax1, ay0, ay1 = a
+        orig_ay0 = ay0
+        col = fitz.Rect(ax0, 0, ax1, page_h)
         if pidx < len(page_img_rects):
-            col = fitz.Rect(ax0, 0, ax1, page_h)
             for img_r in page_img_rects[pidx]:
                 if img_r.intersects(col) and img_r.y0 < ay1:
                     ay0 = max(ay0, img_r.y1 + 8)
+        if pidx < len(page_draw_zones):
+            dz = page_draw_zones[pidx]
+            if not dz.is_empty and dz.intersects(col) and dz.y0 < ay1:
+                ay0 = max(ay0, dz.y1 + 8)
+        # 드로잉이 콘텐츠 영역 전체를 덮으면 원래 ay0으로 복원
+        if ay1 - ay0 < 30:
+            ay0 = orig_ay0
         return ax0, ax1, ay0, ay1
 
     def _place(page, ax0, ax1, ay0, ay1, queue):
-        y = ay0
+        y   = ay0
+        tws = {}   # color → TextWriter  (페이지당 write_text 최소화)
+        bw  = max(ax1 - ax0, 1.0)
         while queue:
             item = queue[0]
             size = item["size"]; lh = size * LINE_HEIGHT_RATIO; gap = size * PARA_GAP_RATIO
-            bw   = max(ax1 - ax0, 1.0)
             if y + size > ay1: break
             lines = _wrap_lines(item["text"], bw, ko_font, size)
-            tw    = fitz.TextWriter(page.rect, color=item["color"])
+            color = item["color"]
+            if color not in tws:
+                tws[color] = fitz.TextWriter(page.rect, color=color)
+            tw = tws[color]
             rendered = 0
             for line in lines:
                 if y + size > ay1: break
                 tw.append((ax0, y + size), line, font=ko_font, fontsize=size)
                 y += lh; rendered += 1
-            tw.write_text(page)
             if rendered < len(lines):
                 queue[0] = {**item, "text": " ".join(lines[rendered:])}; break
             else:
                 queue.pop(0); y += gap
+        for tw in tws.values():
+            tw.write_text(page)
 
     pidx = 0
     while True:
@@ -179,6 +233,13 @@ def translate_pdf(inp: Path, out: Path, max_pages: int):
         else:
             _place(page, ax0, ax1, ay0, ay1, regular_q)
         pidx += 1
+
+    # 드로잉 영역 내 텍스트 원위치 삽입
+    from gui_translator import _insert_ko_text
+    for ip_pidx, items in inplace_map.items():
+        page = doc[ip_pidx]
+        for bbox, text, size, color in items:
+            _insert_ko_text(page, bbox, text, ko_font, size, color)
 
     out.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(out), deflate=True, garbage=4)

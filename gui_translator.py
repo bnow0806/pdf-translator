@@ -60,52 +60,74 @@ LINE_HEIGHT_RATIO = 1.75   # 한국어 출판 표준 행간 (ref_design 기준)
 PARA_GAP_RATIO   = 0.6    # 단락 사이 추가 여백 (행간의 배수)
 
 
+_tl_cache: dict = {}  # (text, fontsize) → float  단어/문자 폭 캐시
+
+
 def _wrap_lines(text, bbox_w, font, fontsize):
     """텍스트를 bbox_w 폭으로 줄바꿈. URL 등 긴 단어는 문자 단위 분할."""
+    cache = _tl_cache
+
+    def _tl(t):
+        k = (t, fontsize)
+        v = cache.get(k)
+        if v is None:
+            cache[k] = v = font.text_length(t, fontsize)
+        return v
+
+    space_w = _tl(" ")
+
     def _char_split(w):
-        parts, part = [], ""
+        parts, part, pw = [], "", 0.0
         for ch in w:
-            if font.text_length(part + ch, fontsize) <= bbox_w:
-                part += ch
+            cw = _tl(ch)
+            if pw + cw <= bbox_w:
+                part += ch; pw += cw
             else:
-                if part:
-                    parts.append(part)
-                part = ch
-        if part:
-            parts.append(part)
+                if part: parts.append(part)
+                part, pw = ch, cw
+        if part: parts.append(part)
         return parts
 
     words = text.split()
-    lines, cur = [], ""
+    lines, cur_words, cur_w = [], [], 0.0
     for w in words:
-        test = (cur + " " + w).strip()
-        if font.text_length(test, fontsize) <= bbox_w:
-            cur = test
+        ww = _tl(w)
+        extra = (space_w if cur_words else 0.0) + ww
+        if cur_w + extra <= bbox_w:
+            cur_words.append(w); cur_w += extra
         else:
-            if cur:
-                lines.append(cur)
-            if font.text_length(w, fontsize) > bbox_w:
+            if cur_words: lines.append(" ".join(cur_words))
+            if ww > bbox_w:
                 parts = _char_split(w)
                 lines.extend(parts[:-1])
-                cur = parts[-1] if parts else ""
+                cur_words = [parts[-1]] if parts else []
+                cur_w = _tl(cur_words[0]) if cur_words else 0.0
             else:
-                cur = w
-    if cur:
-        lines.append(cur)
+                cur_words = [w]; cur_w = ww
+    if cur_words:
+        lines.append(" ".join(cur_words))
     return lines
 
 
 def _insert_ko_text(page, bbox, text, font, fontsize, color=(0, 0, 0)):
-    """TextWriter로 bbox 내에 한국어 텍스트를 줄바꿈하여 삽입."""
+    """TextWriter로 bbox 내에 한국어 텍스트를 줄바꿈하여 삽입. bbox 초과 시 폰트 축소."""
     import fitz as _fitz
-    lines = _wrap_lines(text, bbox.x1 - bbox.x0, font, fontsize)
-    lh    = fontsize * LINE_HEIGHT_RATIO
-    y     = bbox.y0 + fontsize
-    tw    = _fitz.TextWriter(page.rect, color=color)
+    bw   = max(bbox.x1 - bbox.x0, 1.0)
+    bh   = bbox.y1 - bbox.y0
+    size = max(fontsize, 6.0)
+    lines = _wrap_lines(text, bw, font, size)
+    while size > 6.0:
+        lines = _wrap_lines(text, bw, font, size)
+        if len(lines) * size * LINE_HEIGHT_RATIO <= bh or size <= 6.0:
+            break
+        size -= 0.5
+    lh = size * LINE_HEIGHT_RATIO
+    y  = bbox.y0 + size
+    tw = _fitz.TextWriter(page.rect, color=color)
     for line in lines:
         if y > bbox.y1:
             break
-        tw.append((bbox.x0, y), line, font=font, fontsize=fontsize)
+        tw.append((bbox.x0, y), line, font=font, fontsize=size)
         y += lh
     tw.write_text(page)
 
@@ -983,8 +1005,7 @@ class App:
             if self._cancel.is_set():
                 raise InterruptedError()
 
-            self._log("  번역 완료", "ok")
-            self._set_pct(85, "3/3  PDF 저장 중...")
+            self._set_pct(85, "3/3  텍스트 삽입 중...")
 
             # ── 3단계: 텍스트 교체 & 저장 ──────────────────────────────────
             self._log("[3/3] 번역 텍스트 삽입 중...", "info")
@@ -992,21 +1013,43 @@ class App:
             # ── 사전 수집: 이미지 블록 위치 & 특수 페이지 판별 ──────────────
             SPECIAL_CHARS = 400   # 원본 텍스트 이 미만 → 표지·챕터 오프너 등 특수 페이지
             page_img_rects  = []  # 각 페이지의 이미지 bbox 목록
+            page_draw_zones = []  # 각 페이지의 벡터 드로잉 union bbox
             special_pages   = set()
 
             for pidx in range(total_pages):
+                self._set_pct(85 + pidx / total_pages * 5,
+                              f"3/3  분석 중... {pidx+1}/{total_pages}p")
                 raw_blks = doc[pidx].get_text(
                     "dict",
                     flags=fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_PRESERVE_IMAGES
                 )["blocks"]
                 imgs = [fitz.Rect(b["bbox"]) for b in raw_blks if b.get("type") == 1]
                 page_img_rects.append(imgs)
+
+                # 벡터 드로잉 영역 수집 (페이지 내 유효 면적 500pt² 이상, 배경 fill 80% 초과 제외)
+                drawings = doc[pidx].get_drawings()
+                _page_rect = doc[pidx].rect
+                _page_area = _page_rect.get_area()
+                sig = []
+                for _d in drawings:
+                    _clipped = (fitz.Rect(_d["rect"]) & _page_rect).get_area()
+                    if 500 <= _clipped < _page_area * 0.8:
+                        sig.append(fitz.Rect(_d["rect"]))
+                if sig:
+                    dz = sig[0]
+                    for r in sig[1:]: dz |= r
+                    page_draw_zones.append(dz)
+                else:
+                    page_draw_zones.append(fitz.Rect())
+
                 total_chars = sum(len(blk["text"]) for blk in page_blocks[pidx])
                 if total_chars < SPECIAL_CHARS:
                     special_pages.add(pidx)
 
             # 원본 텍스트 일괄 제거
             for pidx in range(total_pages):
+                self._set_pct(90 + pidx / total_pages * 7,
+                              f"3/3  원문 제거 중... {pidx+1}/{total_pages}p")
                 page  = doc[pidx]
                 pblks = page_blocks[pidx]
                 if not pblks:
@@ -1033,9 +1076,24 @@ class App:
                         _med([a[3] for a in valid_areas]),
                         ) if valid_areas else (50, 550, 50, 750)
 
-            # 번역 아이템: 정규 큐 / 특수 페이지 맵으로 분리
+            # 번역 아이템: 정규 큐 / 특수 페이지 맵 / 인플레이스 맵으로 분리
             regular_q   = []          # 일반 페이지 아이템 (리플로우 대상)
             special_map = {}          # {pidx: [items]} — 특수 페이지 전용
+            inplace_map = {}          # {pidx: [(bbox, text, size, color)]} — 드로잉 영역 내 텍스트
+
+            def _is_inplace(blk_bbox, pidx):
+                """블록이 그래픽(이미지·벡터 드로잉) 영역과 40% 이상 겹치면 인플레이스 처리."""
+                blk_area = blk_bbox.get_area()
+                if blk_area <= 0:
+                    return False
+                for img_r in page_img_rects[pidx]:
+                    if (blk_bbox & img_r).get_area() > blk_area * 0.4:
+                        return True
+                if pidx < len(page_draw_zones):
+                    dz = page_draw_zones[pidx]
+                    if not dz.is_empty and (blk_bbox & dz).get_area() > blk_area * 0.4:
+                        return True
+                return False
 
             b_idx = 0
             for pidx in range(total_pages):
@@ -1057,8 +1115,22 @@ class App:
                     item = {"text": t_text, "size": size, "color": color}
                     if pidx in special_pages:
                         special_map.setdefault(pidx, []).append(item)
+                    elif _is_inplace(blk["bbox"], pidx):
+                        inplace_map.setdefault(pidx, []).append(
+                            (blk["bbox"], t_text, size, color)
+                        )
                     else:
                         regular_q.append(item)
+
+            # 본문 크기 정규화: 최빈 크기를 body_size로 정의하고
+            # body_size ±2pt 이내 항목을 통일 (chapter 내 글자 불규칙 방지)
+            if regular_q:
+                from collections import Counter
+                size_counts = Counter(round(item["size"]) for item in regular_q)
+                body_size = float(size_counts.most_common(1)[0][0])
+                for item in regular_q:
+                    if abs(item["size"] - body_size) <= 2.0:
+                        item["size"] = body_size
 
             # 페이지 리플로우
             page_w = doc[0].rect.width
@@ -1068,38 +1140,51 @@ class App:
                 a = page_areas[pidx] if pidx < len(page_areas) and page_areas[pidx] \
                     else std_area
                 ax0, ax1, ay0, ay1 = a
+                orig_ay0 = ay0
+                col = fitz.Rect(ax0, 0, ax1, page_h)
                 if pidx < len(page_img_rects):
-                    col = fitz.Rect(ax0, 0, ax1, page_h)
                     for img_r in page_img_rects[pidx]:
                         if img_r.intersects(col) and img_r.y0 < ay1:
                             ay0 = max(ay0, img_r.y1 + 8)
+                if pidx < len(page_draw_zones):
+                    dz = page_draw_zones[pidx]
+                    if not dz.is_empty and dz.intersects(col) and dz.y0 < ay1:
+                        ay0 = max(ay0, dz.y1 + 8)
+                # 드로잉이 콘텐츠 영역 전체를 덮으면 원래 ay0으로 복원
+                if ay1 - ay0 < 30:
+                    ay0 = orig_ay0
                 return ax0, ax1, ay0, ay1
 
             def _place_items(page, ax0, ax1, ay0, ay1, queue):
                 """queue에서 페이지에 들어갈 만큼 삽입. 잔여는 queue[0]에 남김."""
-                y = ay0
+                y    = ay0
+                tws  = {}   # color → TextWriter  (페이지당 write_text 최소화)
+                bw   = max(ax1 - ax0, 1.0)
                 while queue:
                     item = queue[0]
                     size = item["size"]
                     lh   = size * LINE_HEIGHT_RATIO
                     gap  = size * PARA_GAP_RATIO
-                    bw   = max(ax1 - ax0, 1.0)
                     if y + size > ay1:
                         break
                     lines    = _wrap_lines(item["text"], bw, ko_font, size)
-                    tw       = fitz.TextWriter(page.rect, color=item["color"])
+                    color    = item["color"]
+                    if color not in tws:
+                        tws[color] = fitz.TextWriter(page.rect, color=color)
+                    tw       = tws[color]
                     rendered = 0
                     for line in lines:
                         if y + size > ay1:
                             break
                         tw.append((ax0, y + size), line, font=ko_font, fontsize=size)
                         y += lh; rendered += 1
-                    tw.write_text(page)
                     if rendered < len(lines):
                         queue[0] = {**item, "text": " ".join(lines[rendered:])}
                         break
                     else:
                         queue.pop(0); y += gap
+                for tw in tws.values():
+                    tw.write_text(page)
 
             pidx = 0
             while True:
@@ -1113,6 +1198,8 @@ class App:
                 page = doc[pidx]
                 ax0, ax1, ay0, ay1 = _get_area(pidx)
 
+                self._set_pct(97 + min(pidx, total_pages) / max(total_pages, 1) * 2,
+                              f"3/3  텍스트 삽입 중... {min(pidx+1, total_pages)}/{total_pages}p")
                 if pidx in special_pages and pidx < total_pages:
                     # 특수 페이지: 자기 아이템만 배치, overflow 받지 않음
                     page_items = special_map.pop(pidx, [])
@@ -1123,12 +1210,19 @@ class App:
 
                 pidx += 1
 
+            # 드로잉 영역 내 텍스트를 원래 위치에 삽입 (인플레이스)
+            for ip_pidx, items in inplace_map.items():
+                page = doc[ip_pidx]
+                for bbox, text, size, color in items:
+                    _insert_ko_text(page, bbox, text, ko_font, size, color)
+
+            self._set_pct(99, "3/3  저장 중...")
             doc.save(out, deflate=True, garbage=4)
             doc.close()
 
             self._set_pct(100, "완료!")
-            self._log("\n번역 완료!", "ok")
-            self._log(f"저장: {out}", "ok")
+            self._log(f"\n저장: {out}", "ok")
+            self._log("번역 완료", "ok")
             self.root.after(0, lambda: messagebox.showinfo(
                 "완료", f"번역 완료!\n\n{out}"))
 
